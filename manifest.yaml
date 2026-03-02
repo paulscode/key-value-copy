@@ -1,0 +1,126 @@
+# The package identifier used by the OS. Must be unique amongst all other known packages.
+id: key-value-copy
+# A human readable service title
+title: "Key Value Copy"
+# Service version - accepts up to four digits, where the last conforms to revisions necessary for StartOS
+version: 1.0.0
+# Release notes for the update
+release-notes: |
+  Initial release for StartOS
+  - Browser-based key-value storage with AES-256-GCM encryption
+  - Export/import with password-protected .kvc files
+  - Bioluminescent dark UI theme
+# The type of license for the project
+license: MIT
+# The repository URL for the package wrapper
+wrapper-repo: "https://github.com/paulscode/key-value-copy"
+# The original project repository URL
+upstream-repo: "https://github.com/paulscode/key-value-copy"
+# URL to the support site / channel for the project
+support-site: "https://github.com/paulscode/key-value-copy/issues"
+# URL to the marketing site for the project
+marketing-site: "https://github.com/paulscode/key-value-copy"
+# The series of commands to build the project into an s9pk
+build: ["make"]
+# Human readable descriptors for the service
+description:
+  short: Secure key-value storage with encrypted export/import
+  long: |
+    Key Value Copy is a browser-based tool for storing and copying sensitive key-value pairs.
+    Values are encrypted at rest using AES-256-GCM via the Web Crypto API and never displayed
+    in plain text unless explicitly revealed. Features include clipboard auto-clear, password-protected
+    export/import, drag-and-drop reordering, and a bioluminescent dark UI theme.
+# Static file assets for the s9pk package
+assets:
+  license: LICENSE
+  icon: icon.png
+  instructions: instructions.md
+# The main action for initializing the service
+main:
+  type: docker
+  image: main
+  entrypoint: "docker_entrypoint.sh"
+  args: []
+  mounts:
+    main: /root
+  gpu-acceleration: false
+# Supported architectures
+hardware-requirements:
+  arch:
+    - x86_64
+    - aarch64
+# Health checks
+health-checks:
+  web-ui:
+    name: Web Interface
+    success-message: The Key Value Copy UI is accessible
+    type: script
+# Service configuration (password)
+config:
+  get:
+    type: script
+  set:
+    type: script
+# Service properties (displays password)
+properties:
+  type: script
+# Data volumes
+volumes:
+  main:
+    type: data
+# Network interfaces
+interfaces:
+  main:
+    name: User Interface
+    description: The Key Value Copy web interface for managing encrypted key-value pairs
+    tor-config:
+      port-mapping:
+        80: "80"
+    lan-config:
+      443:
+        ssl: true
+        internal: 80
+    ui: true
+    protocols:
+      - tcp
+      - http
+# No service dependencies
+dependencies: {}
+# Backup configuration using the compat system image
+backup:
+  create:
+    type: docker
+    image: compat
+    system: true
+    entrypoint: compat
+    args:
+      - duplicity
+      - create
+      - /mnt/backup
+      - /root/data
+    mounts:
+      BACKUP: "/mnt/backup"
+      main: "/root/data"
+  restore:
+    type: docker
+    image: compat
+    system: true
+    entrypoint: compat
+    args:
+      - duplicity
+      - restore
+      - /mnt/backup
+      - /root/data
+    mounts:
+      BACKUP: "/mnt/backup"
+      main: "/root/data"
+# Migrations
+migrations:
+  from:
+    "*":
+      type: script
+      args: ["from"]
+  to:
+    "*":
+      type: script
+      args: ["to"]

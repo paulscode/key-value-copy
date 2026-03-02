@@ -1,0 +1,4 @@
+builds/
+data/
+docker-images/
+scripts/*.js
