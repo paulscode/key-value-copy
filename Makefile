@@ -93,12 +93,17 @@ _pack-0351: scripts/embassy.js
 scripts/embassy.js: $(shell find scripts -name '*.ts' 2>/dev/null)
 	deno run --allow-read --allow-write --allow-env --allow-net scripts/bundle.ts
 
+# Version declared in the 0.3.x migration; must equal manifest.yaml's version or
+# StartOS leaves the service stuck on "Starting" after an in-place update.
+MIGRATION_VERSION := $(shell grep fromMapping scripts/procedures/migrations.ts | grep -oE '"[0-9][0-9.]*"' | tr -d '"')
+
 # Fail early with a clear message if the 0.3.x prerequisites are missing.
 check-0351:
 	@test -f manifest.yaml || { echo "ERROR: manifest.yaml not found — the 0.3.5.1 (Embassy) half is not in place."; exit 1; }
 	@test -f scripts/embassy.ts || { echo "ERROR: scripts/embassy.ts not found — the 0.3.5.1 procedures are not in place."; exit 1; }
 	@command -v yq >/dev/null || { echo "ERROR: yq is required to read manifest.yaml."; exit 1; }
 	@test -n "$(PKG_VERSION)" || { echo "ERROR: could not read .version from manifest.yaml."; exit 1; }
+	@test "$(MIGRATION_VERSION)" = "$(PKG_VERSION)" || { echo "ERROR: migration version '$(MIGRATION_VERSION)' (scripts/procedures/migrations.ts) != manifest version '$(PKG_VERSION)' (manifest.yaml). Update fromMapping(...) to match, or the 0.3.x service hangs on 'Starting' after an update."; exit 1; }
 
 # ─────────────────────────────── Release (both) ──────────────────────────
 # Both universal packages (x86_64 + aarch64) into builds/<version>/ + SHA256SUMS.

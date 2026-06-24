@@ -3,11 +3,12 @@ id: key-value-copy
 # A human readable service title
 title: "Key Value Copy"
 # Service version - accepts up to four digits, where the last conforms to revisions necessary for StartOS
-version: 1.0.0.1
+version: 1.0.0.2
 # Release notes for the update
 release-notes: |
   Add support for StartOS 0.4.0 (now packaged for both 0.3.5.1 and 0.4.0).
-  No functional changes to the app itself.
+  Fix the 0.3.5.1 service hanging on "Starting" after an update (the migration
+  now declares the correct package version). No functional changes to the app.
 # The type of license for the project
 license: MIT
 # The repository URL for the package wrapper
