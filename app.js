@@ -81,6 +81,22 @@
     loginError:     $('#loginError'),
     loginSubmit:    $('#loginSubmit'),
     toggleLoginPw:  $('#toggleLoginPw'),
+    // Devices
+    btnDevices:     $('#btnDevices'),
+    devicesOverlay: $('#devicesOverlay'),
+    devicesClose:   $('#devicesClose'),
+    devicesCancel:  $('#devicesCancel'),
+    devicesList:    $('#devicesList'),
+    devicesEmpty:   $('#devicesEmpty'),
+    devicesActions: $('#devicesActions'),
+    btnAddDevice:   $('#btnAddDevice'),
+    pairingPanel:   $('#pairingPanel'),
+    pairingQr:      $('#pairingQr'),
+    pairingCode:    $('#pairingCode'),
+    pairingEndpoints: $('#pairingEndpoints'),
+    pairingCountdown: $('#pairingCountdown'),
+    pairingCopy:    $('#pairingCopy'),
+    pairingDone:    $('#pairingDone'),
   };
 
   // ── API Helper ─────────────────────────────────────────────
@@ -103,12 +119,18 @@
   }
 
   // ── Authentication ─────────────────────────────────────────
+  function applyApiEnabled(enabled) {
+    // Hide the Devices screen entirely when the device-sync API is turned off.
+    dom.btnDevices.style.display = (enabled === false) ? 'none' : '';
+  }
+
   async function checkAuth() {
     const stored = sessionStorage.getItem('kvc_session');
     if (!stored) return false;
     sessionToken = stored;
     try {
-      await api('GET', '/api/check');
+      const data = await api('GET', '/api/check');
+      applyApiEnabled(data.api_enabled);
       return true;
     } catch {
       sessionToken = null;
@@ -121,6 +143,7 @@
     const data = await api('POST', '/api/login', { password });
     sessionToken = data.token;
     sessionStorage.setItem('kvc_session', sessionToken);
+    applyApiEnabled(data.api_enabled);
   }
 
   function showLoginOverlay() {
@@ -152,21 +175,22 @@
   }
 
   async function loadFromServer() {
-    const data = await api('GET', '/api/data');
-    await initCrypto(data);
-    loadEntries(data);
-    render();
+    await initCrypto();
+    vault.clear();
+    sinceSeq = 0;
+    await enqueueSync(() => pull(0));
     hideLoginOverlay();
+    startPolling();
   }
 
   // ── Crypto Module ──────────────────────────────────────────
-  async function initCrypto(serverData) {
+  async function initCrypto() {
     if (!hasCrypto) return;
-
     try {
-      if (serverData && serverData.cryptoKey) {
+      const data = await api('GET', '/api/v1/vault-key');
+      if (data && data.cryptoKey) {
         cryptoKey = await crypto.subtle.importKey(
-          'jwk', serverData.cryptoKey,
+          'jwk', data.cryptoKey,
           { name: 'AES-GCM', length: 256 },
           true,
           ['encrypt', 'decrypt']
@@ -177,10 +201,8 @@
           true,
           ['encrypt', 'decrypt']
         );
-        // Persist the newly generated key to the server
         const jwk = await crypto.subtle.exportKey('jwk', cryptoKey);
-        if (serverData) serverData.cryptoKey = jwk;
-        await api('PUT', '/api/data', { entries: (serverData && serverData.entries) || [], cryptoKey: jwk });
+        await api('PUT', '/api/v1/vault-key', { cryptoKey: jwk });
       }
     } catch {
       hasCrypto = false;
@@ -220,23 +242,131 @@
     return new TextDecoder().decode(decrypted);
   }
 
-  // ── Storage ────────────────────────────────────────────────
-  function loadEntries(serverData) {
-    entries = (serverData && serverData.entries) || [];
-  }
+  // ── Sync client ────────────────────────────────────────────
+  // `vault` is the authoritative local mirror (id -> full record incl. rev/hlc/
+  // order/deleted/conflict). `entries` is the derived, live, ordered view the UI
+  // renders. Every mutation updates the vault optimistically, re-renders, then
+  // pushes a delta to /api/v1/sync and reconciles the server's response — so two
+  // browsers (or, later, the Android app) editing concurrently converge instead
+  // of clobbering each other the way the old whole-blob PUT did.
+  const vault = new Map();
+  const dirty = new Set();          // ids with un-pushed local changes
+  let sinceSeq = 0;
+  let pollTimer = null;
+  let syncChain = Promise.resolve();
 
-  async function saveEntries() {
-    const jwk = (hasCrypto && cryptoKey) ? await crypto.subtle.exportKey('jwk', cryptoKey) : null;
-    try {
-      await api('PUT', '/api/data', { entries, cryptoKey: jwk });
-    } catch (err) {
-      console.error('Failed to save:', err);
-      showToast('Failed to save — check connection', 'error');
-    }
+  // Client Hybrid Logical Clock (mirrors the server/sync-engine format).
+  const ORDER_GAP = 1024;
+  const deviceNode = (() => {
+    let n = localStorage.getItem('kvc_node');
+    if (!n) { n = Math.random().toString(16).slice(2, 6); localStorage.setItem('kvc_node', n); }
+    return n;
+  })();
+  const hlcState = { p: 0, c: 0 };
+  function hlcNow() {
+    const pt = Date.now();
+    if (pt > hlcState.p) { hlcState.p = pt; hlcState.c = 0; }
+    else { hlcState.c += 1; }
+    return `${hlcState.p}:${hlcState.c}:${deviceNode}`;
+  }
+  function observeHlc(hlc) {
+    if (!hlc) return;
+    const parts = String(hlc).split(':');
+    const rp = parseInt(parts[0], 10) || 0;
+    const rc = parseInt(parts[1], 10) || 0;
+    if (rp > hlcState.p) { hlcState.p = rp; hlcState.c = rc; }
+    else if (rp === hlcState.p && rc > hlcState.c) { hlcState.c = rc; }
   }
 
   function generateId() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    if (crypto && crypto.randomUUID) return crypto.randomUUID();
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  }
+
+  function newOrder() {
+    let max = 0;
+    for (const e of vault.values()) if ((e.order || 0) > max) max = e.order;
+    return max + ORDER_GAP;
+  }
+
+  function rebuildEntries() {
+    entries = [...vault.values()]
+      .filter(e => !e.deleted)
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+  }
+
+  // Serialize all sync calls so `sinceSeq` never races between a push and a poll.
+  function enqueueSync(fn) {
+    syncChain = syncChain.then(fn).catch(err => { console.error('sync error', err); });
+    return syncChain;
+  }
+
+  function applyServerChanges(resp) {
+    if (!resp) return;
+    observeHlc(resp.server_hlc);
+    if (typeof resp.new_since === 'number') sinceSeq = resp.new_since;
+    for (const e of (resp.changes || [])) {
+      observeHlc(e.hlc);
+      // Never overwrite an entry with an un-pushed local edit still pending:
+      // its optimistic value (and its last-confirmed base_rev) must survive until
+      // its own flush reconciles it, or the edit is silently lost with no
+      // conflict sibling.
+      if (dirty.has(e.id)) continue;
+      vault.set(e.id, e);
+    }
+    rebuildEntries();
+    renderIfChanged();
+  }
+
+  async function pull(since) {
+    const resp = await api('POST', '/api/v1/sync',
+      { since, device_hlc: hlcNow(), changes: [] });
+    applyServerChanges(resp);
+  }
+
+  function buildChange(e) {
+    // Built at SEND time from current vault state, so base_rev reflects the
+    // latest server-assigned rev — this is what prevents a fast add-then-edit
+    // from racing itself into a spurious conflict.
+    const c = { id: e.id, key: e.key, value: e.value,
+                base_rev: e.rev || 0, hlc: e.hlc, deleted: !!e.deleted };
+    if (e.order != null) c.order = e.order;
+    return c;
+  }
+
+  function markDirty(id) {
+    dirty.add(id);
+  }
+
+  function flushDirty() {
+    return enqueueSync(async () => {
+      if (!dirty.size) return;
+      const ids = [...dirty];
+      dirty.clear();
+      const changes = [];
+      for (const id of ids) {
+        const e = vault.get(id);
+        if (e) changes.push(buildChange(e));
+      }
+      if (!changes.length) return;
+      try {
+        const resp = await api('POST', '/api/v1/sync',
+          { since: sinceSeq, device_hlc: hlcNow(), changes });
+        applyServerChanges(resp);
+      } catch (err) {
+        console.error('Failed to sync:', err);
+        showToast('Sync failed — check connection', 'error');
+        ids.forEach(id => dirty.add(id));   // requeue for the next flush/poll
+      }
+    });
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(() => {
+      if (dirty.size) flushDirty();                       // retry pending pushes
+      else enqueueSync(() => pull(sinceSeq).catch(() => {}));  // pick up others' edits
+    }, 15000);
   }
 
   // ── Rendering ──────────────────────────────────────────────
@@ -252,7 +382,25 @@
     }
   }
 
+  // Signature of everything the rendered list shows (value is masked, so it's
+  // deliberately excluded — a background value change shouldn't repaint the DOM).
+  let lastRenderSig = null;
+  function renderSignature() {
+    return entries
+      .map(e => `${e.id}\x1f${e.order}\x1f${e.key}\x1f${e.deleted ? 1 : 0}\x1f${e.conflict ? 1 : 0}`)
+      .join('\x1e');
+  }
+
+  // Keys shared by 2+ live entries — surfaced as a soft "duplicate name" hint.
+  let dupKeys = new Set();
+  function computeDupKeys() {
+    const counts = {};
+    entries.forEach(e => { counts[e.key] = (counts[e.key] || 0) + 1; });
+    dupKeys = new Set(Object.keys(counts).filter(k => counts[k] > 1));
+  }
+
   function render() {
+    computeDupKeys();
     dom.entryList.innerHTML = '';
     entries.forEach((entry, index) => {
       dom.entryList.appendChild(createEntryRow(entry, index));
@@ -260,6 +408,14 @@
     updateCount();
     toggleEmptyState();
     initDragDrop();
+    lastRenderSig = renderSignature();
+  }
+
+  // Repaint only when the visible list actually changed — this is what keeps the
+  // 15s background poll (and the echo of our own pushes) from flashing the UI.
+  function renderIfChanged() {
+    if (renderSignature() === lastRenderSig) return;
+    render();
   }
 
   function createEntryRow(entry, index) {
@@ -286,17 +442,32 @@
     const content = document.createElement('div');
     content.className = 'entry-content';
 
+    const keyLine = document.createElement('div');
+    keyLine.className = 'entry-key-line';
     const keySpan = document.createElement('span');
     keySpan.className = 'entry-key';
     keySpan.textContent = entry.key;
     keySpan.title = entry.key;
+    keyLine.appendChild(keySpan);
+    if (entry.conflict) {
+      const b = document.createElement('span');
+      b.className = 'entry-badge entry-badge--conflict';
+      b.textContent = 'conflict';
+      keyLine.appendChild(b);
+    } else if (dupKeys.has(entry.key)) {
+      const b = document.createElement('span');
+      b.className = 'entry-badge entry-badge--dup';
+      b.textContent = 'duplicate name';
+      b.title = 'Another entry has the same name';
+      keyLine.appendChild(b);
+    }
 
     const valueSpan = document.createElement('span');
     valueSpan.className = 'entry-value';
     valueSpan.textContent = '••••••••';
     valueSpan.dataset.entryId = entry.id;
 
-    content.appendChild(keySpan);
+    content.appendChild(keyLine);
     content.appendChild(valueSpan);
 
     // Actions
@@ -344,7 +515,85 @@
     row.appendChild(content);
     row.appendChild(actions);
 
+    if (entry.conflict) {
+      row.classList.add('entry-row--conflict');
+      row.appendChild(createConflictBar(entry));
+    }
+
     return row;
+  }
+
+  // ── Conflict resolution UI ─────────────────────────────────
+  function mkResolveBtn(label, fn) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn-conflict';
+    b.textContent = label;
+    b.addEventListener('click', fn);
+    return b;
+  }
+
+  function createConflictBar(entry) {
+    const bar = document.createElement('div');
+    bar.className = 'conflict-bar';
+    const other = entry.conflict && entry.conflict.of ? vault.get(entry.conflict.of) : null;
+    const otherLive = other && !other.deleted;
+
+    const msg = document.createElement('span');
+    msg.className = 'conflict-bar__msg';
+    const acts = document.createElement('div');
+    acts.className = 'conflict-bar__actions';
+
+    if (otherLive) {
+      msg.textContent = `A different version of "${other.key}" was kept — which do you want?`;
+      acts.appendChild(mkResolveBtn('Keep this', () => resolveConflict(entry.id, 'keep-this')));
+      acts.appendChild(mkResolveBtn('Keep other', () => resolveConflict(entry.id, 'keep-other')));
+      acts.appendChild(mkResolveBtn('Keep both', () => resolveConflict(entry.id, 'keep-both')));
+    } else {
+      // No live "other" (it was deleted/renamed away, or this is a resurrected
+      // entry flagged for review) — the only meaningful action is to acknowledge.
+      msg.textContent = 'Flagged after a sync conflict. Review the value, then dismiss.';
+      acts.appendChild(mkResolveBtn('Dismiss', () => resolveConflict(entry.id, 'dismiss')));
+    }
+    bar.appendChild(msg);
+    bar.appendChild(acts);
+    return bar;
+  }
+
+  // Resolving is an ordinary edit/delete that syncs normally (which also clears
+  // the conflict flag server-side), so each action just mutates the vault and
+  // flushes. Robust to nested "(conflict)" rows and a missing/deleted "other".
+  function resolveConflict(id, action) {
+    const s = vault.get(id);
+    if (!s || !s.conflict) return;
+    const other = s.conflict.of ? vault.get(s.conflict.of) : null;
+    const otherLive = other && !other.deleted;
+
+    if (action === 'keep-this' && otherLive) {
+      other.value = s.value;              // the original entry adopts this value
+      other.hlc = hlcNow();
+      other.conflict = null;
+      markDirty(other.id);
+      s.deleted = true;                   // drop this conflict copy
+      s.hlc = hlcNow();
+      markDirty(s.id);
+      showToast('Kept this version', 'success');
+    } else if (action === 'keep-other' && otherLive) {
+      s.deleted = true;                   // drop this copy; the original stays
+      s.hlc = hlcNow();
+      markDirty(s.id);
+      showToast('Kept the other version', 'success');
+    } else {
+      // keep-both / dismiss / (keep-this|keep-other with no live other):
+      // just clear the flag so this entry becomes a normal, standalone entry.
+      s.conflict = null;
+      s.hlc = hlcNow();
+      markDirty(s.id);
+      showToast('Conflict resolved', 'success');
+    }
+    rebuildEntries();
+    render();
+    flushDirty();
   }
 
   function createActionButton(title, className, svgHTML) {
@@ -493,29 +742,30 @@
 
     if (editingId) {
       // Update existing
-      const entry = entries.find(e => e.id === editingId);
+      const entry = vault.get(editingId);
       if (entry) {
         entry.key = key;
         entry.value = encryptedValue;
-        entry.modified = Date.now();
+        entry.hlc = hlcNow();
+        markDirty(entry.id);
       }
       showToast('Entry updated', 'success');
     } else {
       // Add new
-      entries.push({
-        id: generateId(),
-        key,
-        value: encryptedValue,
-        created: Date.now(),
-        modified: Date.now()
-      });
+      const id = generateId();
+      const order = newOrder();
+      const hlc = hlcNow();
+      vault.set(id, { id, key, value: encryptedValue, order, created: Date.now(),
+                      rev: 0, hlc, deleted: false, conflict: null });
+      markDirty(id);
       showToast('Entry added', 'success');
     }
 
-    saveEntries();
+    rebuildEntries();
     render();
     closeModal(dom.modalOverlay);
     editingId = null;
+    flushDirty();
   }
 
   function resetToggleVis() {
@@ -543,25 +793,28 @@
     openModal(dom.deleteOverlay);
   }
 
+  function applyDelete(id) {
+    const entry = vault.get(id);
+    if (!entry) return;
+    entry.deleted = true;          // tombstone; the record stays for sync
+    entry.hlc = hlcNow();
+    markDirty(entry.id);
+    rebuildEntries();
+    render();
+    flushDirty();
+  }
+
   function handleDelete() {
     if (!deletingId) return;
-
-    const row = dom.entryList.querySelector(`[data-id="${deletingId}"]`);
+    const id = deletingId;
+    const row = dom.entryList.querySelector(`[data-id="${id}"]`);
     if (row) {
       row.classList.add('removing');
-      row.addEventListener('animationend', () => {
-        entries = entries.filter(e => e.id !== deletingId);
-        saveEntries();
-        render();
-        deletingId = null;
-      }, { once: true });
+      row.addEventListener('animationend', () => applyDelete(id), { once: true });
     } else {
-      entries = entries.filter(e => e.id !== deletingId);
-      saveEntries();
-      render();
-      deletingId = null;
+      applyDelete(id);
     }
-
+    deletingId = null;
     closeModal(dom.deleteOverlay);
     showToast('Entry deleted', 'info');
   }
@@ -583,6 +836,7 @@
     closeModal(dom.deleteOverlay);
     closeModal(dom.exportOverlay);
     closeModal(dom.importOverlay);
+    closeDevicesModal();
   }
 
   // ── Drag & Drop ────────────────────────────────────────────
@@ -693,12 +947,20 @@
     });
     el.classList.remove('dragging');
 
-    // Reorder data
+    // Reorder data: reassign sparse order values and push only what moved.
     if (initialIndex !== currentIndex) {
       const [moved] = entries.splice(initialIndex, 1);
       entries.splice(currentIndex, 0, moved);
-      saveEntries();
+      entries.forEach((e, i) => {
+        const ord = (i + 1) * ORDER_GAP;
+        if (e.order !== ord) {
+          e.order = ord;
+          e.hlc = hlcNow();
+          markDirty(e.id);
+        }
+      });
       render();
+      flushDirty();
     }
 
     dragState = null;
@@ -973,6 +1235,7 @@
       // Build set of existing keys for dedup
       const existingKeys = new Set(entries.map(e => e.key));
       let renamedCount = 0;
+      let order = newOrder();
 
       for (const item of importedEntries) {
         if (!item.key || typeof item.value !== 'string') continue;
@@ -984,17 +1247,17 @@
         existingKeys.add(finalKey);
 
         const encryptedValue = await encryptValue(item.value);
-        entries.push({
-          id: generateId(),
-          key: finalKey,
-          value: encryptedValue,
-          created: Date.now(),
-          modified: Date.now()
-        });
+        const id = generateId();
+        const hlc = hlcNow();
+        vault.set(id, { id, key: finalKey, value: encryptedValue, order,
+                        created: Date.now(), rev: 0, hlc, deleted: false, conflict: null });
+        markDirty(id);
+        order += ORDER_GAP;
       }
 
-      saveEntries();
+      rebuildEntries();
       render();
+      flushDirty();
       closeModal(dom.importOverlay);
 
       let msg = `Imported ${importedEntries.length} entries`;
@@ -1014,6 +1277,178 @@
       dom.importError.classList.remove('hidden');
       dom.importPassword.focus();
       dom.importPassword.select();
+    }
+  }
+
+  // ── Devices / API keys ─────────────────────────────────────
+  let pairingTimer = null;
+  let pairingPoll = null;
+
+  async function openDevicesModal() {
+    hidePairingPanel();
+    openModal(dom.devicesOverlay);
+    await loadDevices();
+  }
+
+  function closeDevicesModal() {
+    hidePairingPanel();
+    closeModal(dom.devicesOverlay);
+  }
+
+  function hidePairingPanel() {
+    if (pairingTimer) { clearInterval(pairingTimer); pairingTimer = null; }
+    if (pairingPoll) { clearInterval(pairingPoll); pairingPoll = null; }
+    dom.pairingPanel.classList.add('hidden');
+    dom.devicesActions.classList.remove('hidden');
+  }
+
+  function fmtWhen(ms) {
+    if (!ms) return 'never';
+    const s = Math.floor((Date.now() - ms) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  }
+
+  async function loadDevices() {
+    try {
+      const data = await api('GET', '/api/keys');
+      renderDevices(data.keys || []);
+    } catch {
+      showToast('Failed to load devices', 'error');
+    }
+  }
+
+  function renderDevices(keys) {
+    dom.devicesList.innerHTML = '';
+    dom.devicesEmpty.classList.toggle('hidden', keys.length > 0);
+    keys.forEach(k => {
+      const name = (k.label && k.label.trim())
+        ? k.label
+        : (k.status === 'pending' ? 'Awaiting pairing…' : 'Unnamed device');
+      const meta = k.status === 'pending'
+        ? 'Pending — share the pairing code'
+        : `${k.key_prefix || ''} · ${k.last_transport || 'no'} transport · last synced ${fmtWhen(k.last_used)}`;
+
+      const row = document.createElement('div');
+      row.className = 'device-row';
+
+      const info = document.createElement('div');
+      info.className = 'device-info';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'device-name';
+      nameEl.textContent = name + ' ';
+      const badge = document.createElement('span');
+      badge.className = `device-badge device-badge--${k.status}`;
+      badge.textContent = k.status;
+      nameEl.appendChild(badge);
+      const metaEl = document.createElement('div');
+      metaEl.className = 'device-meta text-dim';
+      metaEl.textContent = meta;
+      info.appendChild(nameEl);
+      info.appendChild(metaEl);
+
+      const revoke = document.createElement('button');
+      revoke.className = 'btn btn--danger btn--sm';
+      revoke.textContent = 'Revoke';
+      revoke.addEventListener('click', () => revokeDevice(k.id, name));
+
+      row.appendChild(info);
+      row.appendChild(revoke);
+      dom.devicesList.appendChild(row);
+    });
+  }
+
+  async function revokeDevice(id, name) {
+    try {
+      await api('DELETE', '/api/keys/' + encodeURIComponent(id));
+      showToast(`Revoked ${name}`, 'info');
+      await loadDevices();
+    } catch {
+      showToast('Failed to revoke device', 'error');
+    }
+  }
+
+  async function addDevice() {
+    try {
+      // The device supplies its own name when it pairs, so no prompt here.
+      const res = await api('POST', '/api/keys', { label: '' });
+      showPairing(res.pairing, res.pairing_qr, res.key && res.key.id);
+      await loadDevices();
+    } catch {
+      showToast('Failed to create device', 'error');
+    }
+  }
+
+  function showPairing(pairing, qrSvg, keyId) {
+    if (qrSvg) {
+      dom.pairingQr.innerHTML = qrSvg;      // server-rendered SVG (trusted markup)
+      dom.pairingQr.classList.remove('hidden');
+    } else {
+      dom.pairingQr.classList.add('hidden');
+    }
+    dom.pairingCode.textContent = pairing.enroll_code;
+    // Endpoints the app should connect to. Prefer server-discovered LAN/Tor URLs;
+    // fall back to the origin this browser is using if discovery isn't wired up.
+    const endpoints = [];
+    if (pairing.lan_url) endpoints.push(['LAN', pairing.lan_url]);
+    if (pairing.onion_url) endpoints.push(['Tor', pairing.onion_url]);
+    if (!endpoints.length) endpoints.push(['Server', window.location.origin]);
+    dom.pairingEndpoints.innerHTML = '';
+    endpoints.forEach(([label, url]) => {
+      const row = document.createElement('div');
+      row.className = 'pairing-endpoint';
+      const l = document.createElement('span');
+      l.className = 'pairing-endpoint__label';
+      l.textContent = label;
+      const v = document.createElement('span');
+      v.className = 'pairing-endpoint__url';
+      v.textContent = url;
+      row.appendChild(l);
+      row.appendChild(v);
+      dom.pairingEndpoints.appendChild(row);
+    });
+    dom.pairingPanel.classList.remove('hidden');
+    dom.devicesActions.classList.add('hidden');
+    const exp = pairing.enroll_exp;
+    const tick = () => {
+      const left = Math.max(0, Math.floor((exp - Date.now()) / 1000));
+      const m = Math.floor(left / 60), s = left % 60;
+      dom.pairingCountdown.textContent = `${m}:${String(s).padStart(2, '0')}`;
+      if (left <= 0) { hidePairingPanel(); loadDevices(); }
+    };
+    tick();
+    pairingTimer = setInterval(tick, 1000);
+
+    // Watch for the device claiming the code so the panel doesn't sit on
+    // "Awaiting pairing…" after a successful pair. Poll the key's status and,
+    // once it goes active, dismiss the panel and refresh the list.
+    if (keyId) {
+      pairingPoll = setInterval(async () => {
+        try {
+          const data = await api('GET', '/api/keys');
+          const k = (data.keys || []).find(x => x.id === keyId);
+          if (k && k.status === 'active') {
+            hidePairingPanel();
+            renderDevices(data.keys || []);
+            showToast(`Paired ${k.label || 'device'}`, 'success');
+          } else if (!k) {
+            // Key vanished (expired sweep / revoked) — stop waiting.
+            hidePairingPanel();
+            loadDevices();
+          }
+        } catch { /* transient; keep polling */ }
+      }, 2500);
+    }
+  }
+
+  async function copyPairingCode() {
+    try {
+      await navigator.clipboard.writeText(dom.pairingCode.textContent);
+      showToast('Pairing code copied', 'success');
+    } catch {
+      showToast('Copy failed', 'error');
     }
   }
 
@@ -1073,6 +1508,17 @@
       if (e.target === dom.importOverlay) closeModal(dom.importOverlay);
     });
     setupPeekToggle(dom.toggleImportPw, dom.importPassword);
+
+    // Devices modal
+    dom.btnDevices.addEventListener('click', openDevicesModal);
+    dom.devicesClose.addEventListener('click', closeDevicesModal);
+    dom.devicesCancel.addEventListener('click', closeDevicesModal);
+    dom.btnAddDevice.addEventListener('click', addDevice);
+    dom.pairingCopy.addEventListener('click', copyPairingCode);
+    dom.pairingDone.addEventListener('click', () => { hidePairingPanel(); loadDevices(); });
+    dom.devicesOverlay.addEventListener('click', (e) => {
+      if (e.target === dom.devicesOverlay) closeDevicesModal();
+    });
 
     // File input change
     dom.importFile.addEventListener('change', (e) => {

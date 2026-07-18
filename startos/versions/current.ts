@@ -1,10 +1,10 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '1.0.0:2',
+  version: '1.1.0:0',
   releaseNotes: {
     en_US:
-      'First release packaged for StartOS 0.4.0 (also available for 0.3.5.1). No functional changes to the app itself.',
+      "Adds companion-app support: securely sync your vault to a phone or tablet over your local network or Tor, with per-device access keys you can grant and revoke individually from the new Devices screen. Includes automatic conflict resolution when the same entry is edited in two places (with a one-tap resolver), a faster SQLite storage engine (existing entries migrate automatically), configurable sync policies, and security hardening. No change to how you use the app day to day.",
   },
   migrations: {
     up: async ({ effects }) => {},

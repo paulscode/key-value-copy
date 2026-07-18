@@ -2,6 +2,9 @@ FROM alpine:3.20
 
 RUN apk update && \
     apk add --no-cache tini python3 && \
+    apk add --no-cache --virtual .build py3-pip && \
+    pip install --no-cache-dir --break-system-packages 'qrcode==8.2' && \
+    apk del .build && \
     rm -f /var/cache/apk/*
 
 # Copy static web files
@@ -11,8 +14,12 @@ COPY styles.css /var/www/html/
 COPY app.js /var/www/html/
 COPY favicon.svg /var/www/html/
 
-# Copy server
+# Copy server (server.py imports store.py, which imports sync_engine.py; all
+# three sit in the same dir so plain `import` resolves them).
 COPY server.py /usr/local/bin/server.py
+COPY store.py /usr/local/bin/store.py
+COPY sync_engine.py /usr/local/bin/sync_engine.py
+COPY parse_config.py /usr/local/bin/parse_config.py
 
 # Shared env-driven supervisor (used directly on StartOS 0.4.x and for plain
 # `docker run`), plus the 0.3.x config.yaml-driven shim that execs it.

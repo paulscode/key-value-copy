@@ -9,6 +9,10 @@ export const seedFiles = sdk.setupOnInit(async (effects) => {
   if (!existing || !existing.password) {
     await configJson.write(effects, {
       password: utils.getDefaultString({ charset: 'a-z,A-Z,0-9', len: 24 }),
+      enable_api: true,
+      conflict_strategy: 'preserve',
+      delete_strategy: 'edit-wins',
+      tombstone_days: 90,
     })
   }
 })

@@ -4,6 +4,9 @@ data/
 docker-images/
 node_modules/
 javascript/
+internal_docs/
+__pycache__/
+*.pyc
 startos/*.js
 scripts/*.js
 ncc-cache

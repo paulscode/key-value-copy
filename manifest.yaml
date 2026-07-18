@@ -3,12 +3,10 @@ id: key-value-copy
 # A human readable service title
 title: "Key Value Copy"
 # Service version - accepts up to four digits, where the last conforms to revisions necessary for StartOS
-version: 1.0.0.2
+version: 1.1.0.0
 # Release notes for the update
 release-notes: |
-  Add support for StartOS 0.4.0 (now packaged for both 0.3.5.1 and 0.4.0).
-  Fix the 0.3.5.1 service hanging on "Starting" after an update (the migration
-  now declares the correct package version). No functional changes to the app.
+  Adds companion-app support: securely sync your vault to a phone or tablet over your local network or Tor, with per-device access keys you can grant and revoke individually from the new Devices screen. Includes automatic conflict resolution when the same entry is edited in two places (with a one-tap resolver), a faster SQLite storage engine (existing entries migrate automatically), configurable sync policies, and security hardening. No change to how you use the app day to day.
 # The type of license for the project
 license: MIT
 # The repository URL for the package wrapper

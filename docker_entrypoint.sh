@@ -51,6 +51,12 @@ data:
 EOF
 
 export KVC_PASSWORD="$PASSWORD"
+
+# Optional policy/API knobs from config.yaml -> KVC_* env. Parsed by a helper
+# script (no fragile inline shell-quoting) and guarded so a parse failure can
+# never abort the entrypoint; unset keys fall back to server-side defaults.
+eval "$(python3 /usr/local/bin/parse_config.py "$CONFIG" 2>/dev/null || true)"
+
 export KVC_DATA_DIR="$DATA_DIR"
 export KVC_STATIC_DIR=/var/www/html
 export KVC_PORT=80

@@ -29,7 +29,8 @@ BUILD_DIR := builds/$(PKG_VERSION)
 STARTOS_FILES := $(shell find startos -type f 2>/dev/null)
 # Anything that affects the bundled image (invalidates a repack when changed).
 IMAGE_FILES := Dockerfile docker_entrypoint_040.sh docker_entrypoint.sh \
-               server.py index.html app.js styles.css favicon.svg
+               server.py store.py sync_engine.py parse_config.py \
+               index.html app.js styles.css favicon.svg
 
 .DELETE_ON_ERROR:
 .PHONY: all 040 040-x86_64 040-aarch64 \

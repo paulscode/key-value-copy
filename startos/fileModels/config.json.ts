@@ -12,5 +12,9 @@ export const configJson = FileHelper.json(
   },
   z.object({
     password: z.string().catch(''),
+    enable_api: z.boolean().catch(true),
+    conflict_strategy: z.enum(['preserve', 'lww']).catch('preserve'),
+    delete_strategy: z.enum(['edit-wins', 'delete-wins']).catch('edit-wins'),
+    tombstone_days: z.number().int().catch(90),
   }),
 )
