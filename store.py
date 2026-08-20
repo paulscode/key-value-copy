@@ -66,7 +66,14 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created        INTEGER,
   last_used      INTEGER,
   last_transport TEXT,                   -- lan|tor
-  revoked_at     INTEGER
+  revoked_at     INTEGER,
+  -- A key that can dump everything is a poor trade when one vault holds
+  -- personal, business and machine values side by side. `scope_prefix` limits
+  -- a key to entries whose name starts with it; `read_only` stops it writing.
+  -- NULL scope means unrestricted, which is what every existing key was issued
+  -- as, so the column can be added without changing what already works.
+  scope_prefix   TEXT,
+  read_only      INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -88,6 +95,7 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=DELETE")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.executescript(_SCHEMA)
+        self._migrate_locked()
         self._conn.commit()
         if self._meta_get("schema_version") is None:
             self._meta_set("schema_version", str(SCHEMA_VERSION))
@@ -98,6 +106,21 @@ class Store:
         # Node id for HLCs: short, stable, server-scoped.
         self._clock = HLCClock(self.server_id[:4], now_ms)
         self._prime_clock()
+
+    # Added after api_keys shipped. SQLite has no ADD COLUMN IF NOT EXISTS and
+    # CREATE TABLE IF NOT EXISTS never re-runs, so a column added later would
+    # never appear on an install that already exists.
+    _MIGRATIONS = (
+        ("scope_prefix", "ALTER TABLE api_keys ADD COLUMN scope_prefix TEXT"),
+        ("read_only",
+         "ALTER TABLE api_keys ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0"),
+    )
+
+    def _migrate_locked(self):
+        have = {r[1] for r in self._conn.execute("PRAGMA table_info(api_keys)")}
+        for column, sql in self._MIGRATIONS:
+            if column not in have:
+                self._conn.execute(sql)
 
     # ── meta helpers ───────────────────────────────────────────────
     def _meta_get(self, key):
@@ -456,6 +479,47 @@ class Store:
             new_since, out = self._changes_since_locked(since)
             return {"changes": out, "new_since": new_since}
 
+    def entries_for_scope(self, prefix=None):
+        """Live entries whose key starts with `prefix`, with the crypto key.
+
+        The key NAMES are stored in the clear and only the values are
+        ciphertext, so scoping happens here without the server ever needing to
+        decrypt anything. That matters: adding AES to a standard-library server
+        to filter on a name it can already read would be a dependency bought
+        for nothing.
+        """
+        with self._lock:
+            if prefix:
+                # substr, not LIKE: SQLite's LIKE is case-INSENSITIVE for ASCII,
+                # so a key scoped to "HERMES_" also matched "hermes_lower". A
+                # scope that leaks across case is not a scope. This also needs
+                # no % or _ escaping, which LIKE did and which is easy to get
+                # subtly wrong.
+                rows = self._conn.execute(
+                    "SELECT key, value FROM entries WHERE deleted=0 "
+                    "AND substr(key, 1, ?) = ? ORDER BY key",
+                    (len(prefix), prefix)).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT key, value FROM entries WHERE deleted=0 ORDER BY key"
+                ).fetchall()
+            return {
+                "entries": [{"key": r["key"], "value": json.loads(r["value"])}
+                            for r in rows],
+                "cryptoKey": self.get_crypto_key(),
+                "prefix": prefix or "",
+            }
+
+    def set_key_scope(self, kid, scope_prefix=None, read_only=None):
+        with self._lock:
+            if scope_prefix is not None:
+                self._conn.execute("UPDATE api_keys SET scope_prefix=? WHERE id=?",
+                                   (scope_prefix or None, kid))
+            if read_only is not None:
+                self._conn.execute("UPDATE api_keys SET read_only=? WHERE id=?",
+                                   (1 if read_only else 0, kid))
+            self._conn.commit()
+
     def bootstrap(self):
         with self._lock:
             return {
@@ -496,7 +560,8 @@ class Store:
             self._sweep_expired_locked()
             self._conn.commit()
             rows = self._conn.execute(
-                "SELECT id,label,status,key_prefix,created,last_used,last_transport "
+                "SELECT id,label,status,key_prefix,created,last_used,last_transport,"
+                "scope_prefix,read_only "
                 "FROM api_keys WHERE status!='revoked' ORDER BY created DESC"
             ).fetchall()
             return [dict(r) for r in rows]
@@ -524,13 +589,19 @@ class Store:
             return {"api_key": secret, "key_id": kid}
 
     def verify_api_key(self, secret, transport=None):
-        """Return the key id for a valid active secret (constant-time), else None."""
+        """Return the key RECORD for a valid active secret (constant-time), else None.
+
+        It used to return the id alone. Every caller that enforces a scope needs
+        the scope itself, and looking it up separately would mean a second query
+        that could disagree with the one that authenticated.
+        """
         if not secret:
             return None
         with self._lock:
             h = _sha256(secret)
             rows = self._conn.execute(
-                "SELECT id,key_hash FROM api_keys WHERE status='active'"
+                "SELECT id,key_hash,scope_prefix,read_only,label "
+                "FROM api_keys WHERE status='active'"
             ).fetchall()
             for r in rows:
                 if r["key_hash"] and hmac.compare_digest(h, r["key_hash"]):
@@ -539,7 +610,9 @@ class Store:
                         (int(self._now()), transport, r["id"]),
                     )
                     self._conn.commit()
-                    return r["id"]
+                    return {"id": r["id"], "label": r["label"],
+                            "scope_prefix": r["scope_prefix"],
+                            "read_only": bool(r["read_only"])}
             return None
 
     def revoke_key(self, kid):

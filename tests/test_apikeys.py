@@ -45,7 +45,12 @@ class ApiKeyTests(unittest.TestCase):
         # code not yet claimed -> no usable secret
         self.assertIsNone(self.store.verify_api_key("kvc_x_bogus"))
         secret = self.store.claim_enrollment(p["enroll_code"])["api_key"]
-        self.assertEqual(self.store.verify_api_key(secret, transport="lan"), p["id"])
+        # verify_api_key returns the key RECORD, not the bare id: callers that
+        # enforce a scope need the scope, and a second lookup could disagree
+        # with the one that authenticated.
+        rec = self.store.verify_api_key(secret, transport="lan")
+        self.assertEqual(rec["id"], p["id"])
+        self.assertIsNone(rec["scope_prefix"])
         self.assertIsNone(self.store.verify_api_key(secret + "tamper"))
         self.assertIsNone(self.store.verify_api_key(""))
         # last_used/transport recorded

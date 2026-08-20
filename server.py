@@ -6,6 +6,9 @@ authenticated API endpoints for key-value data storage.
 
 Endpoints:
   POST /api/login    — authenticate with password, returns session token
+  GET  /api/v1/env   — scoped, read-only export for a machine consumer:
+                       the entries a device key is allowed to see, still
+                       encrypted, plus the crypto key to decrypt them
   GET  /api/check    — verify session token validity
   GET  /api/data     — get all entries + crypto key (authenticated)
   PUT  /api/data     — save all entries + crypto key (authenticated)
@@ -358,6 +361,11 @@ class KVCHandler(http.server.BaseHTTPRequestHandler):
         """Auth for /api/v1/* data endpoints: a web session OR an active device
         API key (Bearer kvc_...). Device keys are refused when the API is off,
         and repeated bad API keys are rate-limited (like login/pair)."""
+        # `self.auth_key` is the device record when a device key authenticated,
+        # and None for a web session. Every scope decision below reads it, so it
+        # must be set by the same call that authenticated rather than looked up
+        # again — two lookups can disagree.
+        self.auth_key = None
         token = self.get_bearer_token()
         if verify_session(token):
             return True
@@ -366,9 +374,11 @@ class KVCHandler(http.server.BaseHTTPRequestHandler):
             if not rate_ok(ip, "apikey"):
                 self.send_json(429, {"error": "Too many attempts. Try again later."})
                 return False
-            if (getattr(self.server, "api_enabled", True)
-                    and self.server.store.verify_api_key(token, transport=self.transport())):
-                return True
+            if getattr(self.server, "api_enabled", True):
+                rec = self.server.store.verify_api_key(token, transport=self.transport())
+                if rec:
+                    self.auth_key = rec
+                    return True
             rate_fail(ip, "apikey")
         self.send_json(401, {"error": "Unauthorized"})
         return False
@@ -457,9 +467,50 @@ class KVCHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/v1/changes":
             if not self.require_sync_auth():
                 return
+            scope = (self.auth_key or {}).get("scope_prefix")
+            if scope:
+                # A scoped key does not get the change feed. The feed is the
+                # whole store by design, and handing it to a key that may read
+                # only HERMES_* would make the scope decorative. Scoped keys
+                # read through /api/v1/env instead.
+                self.send_json(403, {
+                    "error": "this key is scoped to " + scope + " and cannot sync",
+                    "use": "/api/v1/env?prefix=" + scope})
+                return
             qs = parse_qs(urlparse(self.path).query)
             since = int((qs.get("since", ["0"])[0]) or 0)
             self.send_json(200, self.server.store.changes_since(since))
+            return
+
+        if path == "/api/v1/env":
+            # Scoped, read-only export for a machine consumer. Returns the
+            # entries a key is allowed to see, still encrypted, plus the crypto
+            # key so the caller can decrypt what it received. The server does
+            # not decrypt: key NAMES are stored in the clear, so filtering never
+            # needs the plaintext, and adding AES to a standard-library server
+            # would be a dependency bought for nothing.
+            if not self.require_sync_auth():
+                return
+            key = self.auth_key
+            if not key:
+                self.send_json(403, {
+                    "error": "this endpoint is for scoped device keys, not the web session",
+                    "why": "a session can already read everything through /api/data"})
+                return
+            scope = key.get("scope_prefix")
+            if not scope:
+                self.send_json(403, {
+                    "error": "this key has no scope, so it may not use /api/v1/env",
+                    "why": "an unscoped export here would be a second way to dump "
+                           "the whole store, which is what scoping exists to prevent"})
+                return
+            asked = parse_qs(urlparse(self.path).query).get("prefix", [""])[0]
+            # The caller may narrow its own scope, never widen it.
+            if asked and not asked.startswith(scope):
+                self.send_json(403, {
+                    "error": "prefix " + asked + " is outside this key's scope " + scope})
+                return
+            self.send_json(200, self.server.store.entries_for_scope(asked or scope))
             return
 
         if path == "/api/v1/vault-key":
@@ -533,6 +584,13 @@ class KVCHandler(http.server.BaseHTTPRequestHandler):
             if body is None:
                 return
             pending = self.server.store.create_pending_key(body.get("label", ""))
+            # A scope is set at creation, not afterwards: a key that is briefly
+            # unscoped is a key that could have dumped the vault in that window.
+            scope = (body.get("scope_prefix") or "").strip() or None
+            if scope or body.get("read_only"):
+                self.server.store.set_key_scope(
+                    pending["id"], scope_prefix=scope,
+                    read_only=bool(body.get("read_only")) or bool(scope))
             disc = self.resolve_endpoints()
             pairing = {
                 "v": 1,
@@ -597,6 +655,13 @@ class KVCHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/v1/sync":
             if not self.require_sync_auth():
+                return
+            key = self.auth_key or {}
+            if key.get("read_only") or key.get("scope_prefix"):
+                # A machine consumer reads its own values; it has no business
+                # writing to a vault two people share.
+                self.send_json(403, {
+                    "error": "this key is read-only and cannot push changes"})
                 return
             body = self.read_json_body()
             if body is None:
