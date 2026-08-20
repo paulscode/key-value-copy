@@ -20,6 +20,14 @@
 #
 # Prerequisites: start-cli, start-sdk, docker buildx, node/npm, deno (0.3.x), yq.
 
+# The 0.4.x packing CLI. Pinned to the 0.4.0 line ON PURPOSE: `start-cli` on PATH
+# tracks whatever StartOS release is newest, and a 1.x CLI stamps osVersion 1.x
+# into the s9pk, which a 0.4.0.1 server will not install. It also wants a
+# "packaging workspace" in the parent directory and signs with a workspace key
+# rather than ~/.startos/developer.key.pem — a different signer than every
+# release shipped so far. Override only if you know which OS you are targeting.
+START_CLI ?= start-cli-0.4.0-beta.9
+
 # Package id comes from the 0.4.x manifest (the always-present source of truth).
 PKG_ID := $(shell awk -F"'" '/id:/ {print $$2; exit}' startos/manifest/index.ts)
 # Release version (e.g. 1.0.0) read from the 0.3.x manifest.
@@ -48,13 +56,13 @@ all: 040
 040-aarch64: $(PKG_ID)-040-aarch64.s9pk
 
 $(PKG_ID)-040.s9pk: javascript/index.js $(IMAGE_FILES) icon.png | check-init
-	start-cli s9pk pack --icon icon.png -o $@
+	$(START_CLI) s9pk pack --icon icon.png -o $@
 
 $(PKG_ID)-040-x86_64.s9pk: javascript/index.js $(IMAGE_FILES) icon.png | check-init
-	start-cli s9pk pack --icon icon.png --arch=x86_64 -o $@
+	$(START_CLI) s9pk pack --icon icon.png --arch=x86_64 -o $@
 
 $(PKG_ID)-040-aarch64.s9pk: javascript/index.js $(IMAGE_FILES) icon.png | check-init
-	start-cli s9pk pack --icon icon.png --arch=aarch64 -o $@
+	$(START_CLI) s9pk pack --icon icon.png --arch=aarch64 -o $@
 
 javascript/index.js: $(STARTOS_FILES) tsconfig.json node_modules
 	npm run check
@@ -108,11 +116,11 @@ check-0351:
 
 # ─────────────────────────────── Release (both) ──────────────────────────
 # Both universal packages (x86_64 + aarch64) into builds/<version>/ + SHA256SUMS.
-release: check-0351 javascript/index.js
+release: check-0351 javascript/index.js | check-init
 	rm -rf $(BUILD_DIR) && mkdir -p $(BUILD_DIR)
 	$(MAKE) 0351
 	cp $(PKG_ID)-0351.s9pk $(BUILD_DIR)/$(PKG_ID)-0351.s9pk
-	start-cli s9pk pack --icon icon.png -o $(BUILD_DIR)/$(PKG_ID)-040.s9pk
+	$(START_CLI) s9pk pack --icon icon.png -o $(BUILD_DIR)/$(PKG_ID)-040.s9pk
 	cd $(BUILD_DIR) && sha256sum *.s9pk > SHA256SUMS
 	@echo ""
 	@echo "Release builds in $(BUILD_DIR):"
@@ -122,21 +130,26 @@ release: check-0351 javascript/index.js
 
 # ─────────────────────────────────── Install ─────────────────────────────
 install-040:         $(PKG_ID)-040.s9pk
-	start-cli package install -s $(PKG_ID)-040.s9pk
+	$(START_CLI) package install -s $(PKG_ID)-040.s9pk
 install-040-x86_64:  $(PKG_ID)-040-x86_64.s9pk
-	start-cli package install -s $(PKG_ID)-040-x86_64.s9pk
+	$(START_CLI) package install -s $(PKG_ID)-040-x86_64.s9pk
 install-040-aarch64: $(PKG_ID)-040-aarch64.s9pk
-	start-cli package install -s $(PKG_ID)-040-aarch64.s9pk
+	$(START_CLI) package install -s $(PKG_ID)-040-aarch64.s9pk
 install-0351:         $(PKG_ID)-0351.s9pk
-	start-cli package install -s $(PKG_ID)-0351.s9pk
+	$(START_CLI) package install -s $(PKG_ID)-0351.s9pk
 install-0351-x86_64:  $(PKG_ID)-0351-x86_64.s9pk
-	start-cli package install -s $(PKG_ID)-0351-x86_64.s9pk
+	$(START_CLI) package install -s $(PKG_ID)-0351-x86_64.s9pk
 install-0351-aarch64: $(PKG_ID)-0351-aarch64.s9pk
-	start-cli package install -s $(PKG_ID)-0351-aarch64.s9pk
+	$(START_CLI) package install -s $(PKG_ID)-0351-aarch64.s9pk
 
-# Ensure a StartOS developer key exists before packing (start-cli needs it).
+# Ensure the packing CLI is the right one and a developer key exists. The version
+# check is not pedantry: `start-cli` on PATH silently became a 1.x build between
+# the 1.1.0.0 and 1.1.1.0 releases, and 1.x packs a package a 0.4.0.1 server will
+# not install, signed by a different key than every release shipped so far.
 check-init:
-	@test -f ~/.startos/developer.key.pem || start-cli init-key
+	@command -v $(START_CLI) >/dev/null || { echo "ERROR: '$(START_CLI)' not found. The 0.4.x package needs a 0.4.0-line CLI. Override with 'make START_CLI=<path>' if you are deliberately targeting another StartOS version."; exit 1; }
+	@$(START_CLI) --version | grep -q ' 0\.4\.0' || { echo "ERROR: '$(START_CLI)' reports '`$(START_CLI) --version`', which is not a 0.4.0-line CLI. See the START_CLI comment at the top of this Makefile."; exit 1; }
+	@test -f ~/.startos/developer.key.pem || $(START_CLI) init-key
 
 clean:
 	rm -rf docker-images builds javascript node_modules
