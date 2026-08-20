@@ -20,12 +20,23 @@
 #
 # Prerequisites: start-cli, start-sdk, docker buildx, node/npm, deno (0.3.x), yq.
 
-# The 0.4.x packing CLI. Pinned to the 0.4.0 line ON PURPOSE: `start-cli` on PATH
-# tracks whatever StartOS release is newest, and a 1.x CLI stamps osVersion 1.x
-# into the s9pk, which a 0.4.0.1 server will not install. It also wants a
-# "packaging workspace" in the parent directory and signs with a workspace key
-# rather than ~/.startos/developer.key.pem — a different signer than every
-# release shipped so far. Override only if you know which OS you are targeting.
+# Which CLI packs the 0.4.x s9pk. Defaults to the 0.4.0-line binary only because
+# it needs no setup and reproduces the shipped releases in the ways that matter.
+#
+# A newer `start-cli` (1.x) is NOT incompatible with a 0.4.0.x server. osVersion
+# is baked into javascript/index.js by the start-sdk npm package, not chosen by
+# the CLI, so 1.1.0 and 0.4.0-beta.9 stamp the identical value — verified by
+# packing this repo with both. The difference is setup, in two parts:
+#
+#   1. 1.x requires a "packaging workspace" — a directory CONTAINING this repo,
+#      holding .startos/config.yaml. It need not be the repo's real parent; any
+#      scratch directory with the repo copied in works.
+#   2. 1.x signs with that workspace's .startos/build.key.pem, and
+#      `init-workspace` generates a FRESH key. Left alone, that ships a package
+#      signed by a different key than every release so far. Copy
+#      ~/.startos/developer.key.pem over build.key.pem and the signer matches.
+#
+# So: `make START_CLI=start-cli` is fine once (1) and (2) are done.
 START_CLI ?= start-cli-0.4.0-beta.9
 
 # Package id comes from the 0.4.x manifest (the always-present source of truth).
@@ -142,13 +153,12 @@ install-0351-x86_64:  $(PKG_ID)-0351-x86_64.s9pk
 install-0351-aarch64: $(PKG_ID)-0351-aarch64.s9pk
 	$(START_CLI) package install -s $(PKG_ID)-0351-aarch64.s9pk
 
-# Ensure the packing CLI is the right one and a developer key exists. The version
-# check is not pedantry: `start-cli` on PATH silently became a 1.x build between
-# the 1.1.0.0 and 1.1.1.0 releases, and 1.x packs a package a 0.4.0.1 server will
-# not install, signed by a different key than every release shipped so far.
+# Ensure the packing CLI exists and a developer key is present. There is
+# deliberately NO check that the CLI is on the 0.4.0 line: a newer CLI packs a
+# perfectly good package for a 0.4.0.x server (see the START_CLI comment), so
+# gating on its version would reject a working toolchain for no reason.
 check-init:
-	@command -v $(START_CLI) >/dev/null || { echo "ERROR: '$(START_CLI)' not found. The 0.4.x package needs a 0.4.0-line CLI. Override with 'make START_CLI=<path>' if you are deliberately targeting another StartOS version."; exit 1; }
-	@$(START_CLI) --version | grep -q ' 0\.4\.0' || { echo "ERROR: '$(START_CLI)' reports '`$(START_CLI) --version`', which is not a 0.4.0-line CLI. See the START_CLI comment at the top of this Makefile."; exit 1; }
+	@command -v $(START_CLI) >/dev/null || { echo "ERROR: '$(START_CLI)' not found. Install it, or point START_CLI at the CLI you want: 'make START_CLI=start-cli' (see the START_CLI comment at the top of this Makefile for the workspace + signing-key setup that a 1.x CLI needs)."; exit 1; }
 	@test -f ~/.startos/developer.key.pem || $(START_CLI) init-key
 
 clean:
