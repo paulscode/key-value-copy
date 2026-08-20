@@ -54,7 +54,7 @@ IMAGE_FILES := Dockerfile docker_entrypoint_040.sh docker_entrypoint.sh \
 .DELETE_ON_ERROR:
 .PHONY: all 040 040-x86_64 040-aarch64 \
         0351 0351-x86_64 0351-aarch64 \
-        release check-0351 _pack-0351 \
+        release check-0351 _pack-0351 check-signers \
         install-040 install-040-x86_64 install-040-aarch64 \
         install-0351 install-0351-x86_64 install-0351-aarch64 \
         check-init clean
@@ -125,6 +125,47 @@ check-0351:
 	@test -n "$(PKG_VERSION)" || { echo "ERROR: could not read .version from manifest.yaml."; exit 1; }
 	@test "$(MIGRATION_VERSION)" = "$(PKG_VERSION)" || { echo "ERROR: migration version '$(MIGRATION_VERSION)' (scripts/procedures/migrations.ts) != manifest version '$(PKG_VERSION)' (manifest.yaml). Update fromMapping(...) to match, or the 0.3.x service hangs on 'Starting' after an update."; exit 1; }
 
+# ────────────────────────── Release signer pinning ───────────────────────
+# Both s9pk formats store the signer's 32-byte ed25519 public key at offset 3,
+# right after the ";;" magic and a format byte. These are the keys every release
+# so far carries. They differ from each other because each SDK keeps its own:
+# the 0.4.x key is ~/.startos/developer.key.pem, the 0.3.x one is start-sdk's.
+#
+# This is the guard the old CLI-version check was a bad proxy for. Signing with
+# the wrong key produces a package that builds and installs perfectly — it just
+# isn't yours, and nothing upstream of here would say so. A 1.x `start-cli` signs
+# with its workspace's .startos/build.key.pem, and `init-workspace` generates a
+# fresh one, so this is a real thing to walk into rather than a hypothetical.
+#
+# Rotating keys deliberately? Update these. Setting one empty skips its check,
+# and the check says so out loud rather than passing quietly.
+EXPECTED_SIGNER_040  ?= aa69c612c0e900f966dbf9a6c646e5e9d13f3d1379f2d59519844406bd1cffff
+EXPECTED_SIGNER_0351 ?= c6fc06bdd5f8ed97ceb7df9cc8534588729992937e26d69bf9d1c6a98822b4d8
+
+check-signers:
+	@for spec in "$(BUILD_DIR)/$(PKG_ID)-040.s9pk:$(EXPECTED_SIGNER_040)" \
+	             "$(BUILD_DIR)/$(PKG_ID)-0351.s9pk:$(EXPECTED_SIGNER_0351)"; do \
+	  f="$${spec%:*}"; want="$${spec##*:}"; \
+	  test -f "$$f" || { echo "ERROR: $$f not built."; exit 1; }; \
+	  if [ -z "$$want" ]; then \
+	    echo "WARNING: no expected signer configured for $$f — signature NOT verified."; \
+	    continue; \
+	  fi; \
+	  got=`od -An -v -tx1 -j 3 -N 32 "$$f" | tr -d ' \n'`; \
+	  if [ "$$got" = "$$want" ]; then \
+	    echo "signer OK   $$f"; \
+	  else \
+	    echo "ERROR: $$f is signed by the wrong key."; \
+	    echo "         got: $$got"; \
+	    echo "    expected: $$want"; \
+	    echo "  Every release so far uses the expected key. If you rotated keys on purpose,"; \
+	    echo "  update EXPECTED_SIGNER_* in this Makefile. If not, check which CLI packed it:"; \
+	    echo "  a 1.x start-cli signs with its workspace's .startos/build.key.pem, and"; \
+	    echo "  init-workspace generates a fresh one — copy ~/.startos/developer.key.pem over it."; \
+	    exit 1; \
+	  fi; \
+	done
+
 # ─────────────────────────────── Release (both) ──────────────────────────
 # Both universal packages (x86_64 + aarch64) into builds/<version>/ + SHA256SUMS.
 release: check-0351 javascript/index.js | check-init
@@ -132,6 +173,9 @@ release: check-0351 javascript/index.js | check-init
 	$(MAKE) 0351
 	cp $(PKG_ID)-0351.s9pk $(BUILD_DIR)/$(PKG_ID)-0351.s9pk
 	$(START_CLI) s9pk pack --icon icon.png -o $(BUILD_DIR)/$(PKG_ID)-040.s9pk
+	@# Before SHA256SUMS on purpose: a wrong-key build should abort here rather
+	@# than leave you a checksum file that looks ready to sign.
+	$(MAKE) check-signers
 	cd $(BUILD_DIR) && sha256sum *.s9pk > SHA256SUMS
 	@echo ""
 	@echo "Release builds in $(BUILD_DIR):"
