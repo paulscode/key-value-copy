@@ -34,7 +34,10 @@ export const main = sdk.setupMain(async ({ effects }) => {
     if (lan) endpointEnv.KVC_LAN_URL = lan
     if (ip) endpointEnv.KVC_LAN_IP = ip
   } catch (e) {
-    console.warn('Endpoint discovery failed; pairing will use the browser origin:', e)
+    console.warn(
+      'Endpoint discovery failed; pairing will use the browser origin:',
+      e,
+    )
   }
 
   const container = sdk.SubContainer.of(

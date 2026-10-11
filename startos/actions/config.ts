@@ -29,7 +29,10 @@ export const inputSpec = InputSpec.of({
     description:
       'When the same entry is changed in two places at once, keep both versions (recommended — nothing is lost) or keep only the most recent edit.',
     default: 'preserve',
-    values: { preserve: 'Keep both (recommended)', lww: 'Most recent edit wins' },
+    values: {
+      preserve: 'Keep both (recommended)',
+      lww: 'Most recent edit wins',
+    },
   }),
   delete_strategy: Value.select({
     name: 'Edit vs. delete',
