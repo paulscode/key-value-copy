@@ -16,28 +16,23 @@
 #   make release               BOTH universal packages -> builds/<version>/ + SHA256SUMS
 #   make install-040[-x86_64]  install the matching build to your StartOS server
 #   make install-0351[-x86_64]
+#   make format               format startos/ with the SDK's prettier config
 #   make clean
 #
 # Prerequisites: start-cli, start-sdk, docker buildx, node/npm, deno (0.3.x), yq.
 
-# Which CLI packs the 0.4.x s9pk. Defaults to the 0.4.0-line binary only because
-# it needs no setup and reproduces the shipped releases in the ways that matter.
+# Which CLI packs the 0.4.x s9pk. start-sdk 3 needs start-cli 2.2.0 or later:
+# older CLIs drop the SDK 3 manifest fields (emulateMissing, each dependency's
+# versionRange/kind/healthChecks) while packing, and still produce a package
+# that installs, so nothing else would catch it.
 #
-# A newer `start-cli` (1.x) is NOT incompatible with a 0.4.0.x server. osVersion
-# is baked into javascript/index.js by the start-sdk npm package, not chosen by
-# the CLI, so 1.1.0 and 0.4.0-beta.9 stamp the identical value — verified by
-# packing this repo with both. The difference is setup, in two parts:
-#
-#   1. 1.x requires a "packaging workspace" — a directory CONTAINING this repo,
-#      holding .startos/config.yaml. It need not be the repo's real parent; any
-#      scratch directory with the repo copied in works.
-#   2. 1.x signs with that workspace's .startos/build.key.pem, and
-#      `init-workspace` generates a FRESH key. Left alone, that ships a package
-#      signed by a different key than every release so far. Copy
-#      ~/.startos/developer.key.pem over build.key.pem and the signer matches.
-#
-# So: `make START_CLI=start-cli` is fine once (1) and (2) are done.
-START_CLI ?= start-cli-0.4.0-beta.9
+# start-cli 1.x and later need a "packaging workspace": a directory CONTAINING
+# this repo, holding .startos/config.yaml. They sign with that workspace's
+# .startos/build.key.pem, and `init-workspace` generates a FRESH key. Left alone,
+# that ships a package signed by a different key than every release so far.
+# Copy ~/.startos/developer.key.pem over build.key.pem and the signer matches;
+# check-signers below verifies it on every release.
+START_CLI ?= start-cli
 
 # Package id comes from the 0.4.x manifest (the always-present source of truth).
 PKG_ID := $(shell awk -F"'" '/id:/ {print $$2; exit}' startos/manifest/index.ts)
@@ -57,7 +52,7 @@ IMAGE_FILES := Dockerfile docker_entrypoint_040.sh docker_entrypoint.sh \
         release check-0351 _pack-0351 check-signers \
         install-040 install-040-x86_64 install-040-aarch64 \
         install-0351 install-0351-x86_64 install-0351-aarch64 \
-        check-init clean
+        check-init clean format
 
 all: 040
 
@@ -75,9 +70,19 @@ $(PKG_ID)-040-x86_64.s9pk: javascript/index.js $(IMAGE_FILES) icon.png | check-i
 $(PKG_ID)-040-aarch64.s9pk: javascript/index.js $(IMAGE_FILES) icon.png | check-init
 	$(START_CLI) s9pk pack --icon icon.png --arch=aarch64 -o $@
 
+# The same gate as the SDK's s9pk.mk: type check, SDK lint, format check, bundle.
+# The SDK supplies typescript, prettier and ncc.
+SDK_DIR := node_modules/@start9labs/start-sdk
+PRETTIER_CONFIG := $(SDK_DIR)/prettier.config.json
+
 javascript/index.js: $(STARTOS_FILES) tsconfig.json node_modules
-	npm run check
-	npm run build
+	npx tsc --noEmit
+	node $(SDK_DIR)/lint.mjs
+	npx prettier --config $(PRETTIER_CONFIG) --check startos
+	rm -rf javascript && npx ncc build startos/index.ts -o javascript
+
+format: | node_modules
+	npx prettier --config $(PRETTIER_CONFIG) --write startos
 
 node_modules: package.json
 	npm i
@@ -197,12 +202,10 @@ install-0351-x86_64:  $(PKG_ID)-0351-x86_64.s9pk
 install-0351-aarch64: $(PKG_ID)-0351-aarch64.s9pk
 	$(START_CLI) package install -s $(PKG_ID)-0351-aarch64.s9pk
 
-# Ensure the packing CLI exists and a developer key is present. There is
-# deliberately NO check that the CLI is on the 0.4.0 line: a newer CLI packs a
-# perfectly good package for a 0.4.0.x server (see the START_CLI comment), so
-# gating on its version would reject a working toolchain for no reason.
+# Ensure the packing CLI exists and a developer key is present. The CLI must be
+# start-cli 2.2.0 or later (see the START_CLI comment); it is not checked here.
 check-init:
-	@command -v $(START_CLI) >/dev/null || { echo "ERROR: '$(START_CLI)' not found. Install it, or point START_CLI at the CLI you want: 'make START_CLI=start-cli' (see the START_CLI comment at the top of this Makefile for the workspace + signing-key setup that a 1.x CLI needs)."; exit 1; }
+	@command -v $(START_CLI) >/dev/null || { echo "ERROR: '$(START_CLI)' not found. Install start-cli 2.2.0 or later, or point START_CLI at it (see the START_CLI comment at the top of this Makefile for the workspace + signing-key setup it needs)."; exit 1; }
 	@test -f ~/.startos/developer.key.pem || $(START_CLI) init-key
 
 clean:

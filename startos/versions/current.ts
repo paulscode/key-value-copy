@@ -1,12 +1,14 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '1.1.1:0',
+  version: '1.1.1:1',
   releaseNotes: {
     en_US:
-      'Adds scoped access keys for machines: a key can now be limited to entries whose names start with a chosen prefix and marked read-only, so a script or appliance can fetch just the values it needs without being able to read — or change — the rest of the vault. Scoped keys read through a new export endpoint and are refused on the full-vault sync endpoints. Existing keys are unscoped and unaffected, as is the companion app. No change to how you use the app day to day.',
+      'Rebuilt on version 3 of the StartOS packaging SDK, which needs StartOS ' +
+      '0.4.0.2. Nothing you have set changes.',
   },
   migrations: {
+    // Nothing to migrate: the SDK changed, and nothing on disk does.
     up: async ({ effects }) => {},
     down: IMPOSSIBLE,
   },

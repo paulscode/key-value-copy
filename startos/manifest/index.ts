@@ -29,7 +29,4 @@ export const manifest = setupManifest({
       arch: ['x86_64', 'aarch64'],
     },
   },
-  // Self-contained: serves its own static UI and tiny Python backend, no
-  // external services required.
-  dependencies: {},
 })

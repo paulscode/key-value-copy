@@ -23,7 +23,9 @@ export const main = sdk.setupMain(async ({ effects }) => {
   // failure the web UI falls back to the origin the admin is already using.
   const endpointEnv: Record<string, string> = {}
   try {
-    const si = await sdk.serviceInterface.getOwn(effects, 'main').const()
+    const si = await sdk.host
+      .getOwn(effects, 'ui', (host) => host?.bindings[port]?.interfaces['main'])
+      .const()
     const urls: string[] = si?.addressInfo?.format('urlstring') ?? []
     const onion = urls.find((u) => u.includes('.onion'))
     const lan = urls.find((u) => u.includes('.local'))
@@ -35,7 +37,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
     console.warn('Endpoint discovery failed; pairing will use the browser origin:', e)
   }
 
-  const container = await sdk.SubContainer.of(
+  const container = sdk.SubContainer.of(
     effects,
     { imageId: 'main' },
     sdk.Mounts.of().mountVolume({

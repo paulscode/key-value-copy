@@ -10,7 +10,7 @@ export const configJson = FileHelper.json(
     base: sdk.volumes.main,
     subpath: '/config.json',
   },
-  z.object({
+  z.looseObject({
     password: z.string().catch(''),
     enable_api: z.boolean().catch(true),
     conflict_strategy: z.enum(['preserve', 'lww']).catch('preserve'),
