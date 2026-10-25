@@ -1,15 +1,16 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '1.1.1:2',
+  version: '1.1.1:3',
   releaseNotes: {
     en_US:
-      'Rebuilt on version 3 of the StartOS packaging SDK, which needs StartOS ' +
-      '0.4.0.2. Nothing you have set changes. ' +
-      'Uses version 3.0.6 of the packaging SDK.',
+      'Moves the base image off Alpine 3.20, which reached end of life, to ' +
+      'Alpine 3.24, picking up security fixes in OpenSSL, musl, zlib and the ' +
+      'CA certificates. ' +
+      'Uses version 3.1.0 of the packaging SDK.',
   },
   migrations: {
-    // Nothing to migrate: the SDK changed, and nothing on disk does.
+    // Nothing to migrate: the image changed, and nothing on disk does.
     up: async ({ effects }) => {},
     down: IMPOSSIBLE,
   },

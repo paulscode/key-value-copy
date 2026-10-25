@@ -3,9 +3,9 @@ id: key-value-copy
 # A human readable service title
 title: "Key Value Copy"
 # Service version - accepts up to four digits, where the last conforms to revisions necessary for StartOS
-version: 1.1.1.2
+version: 1.1.1.3
 # Release notes for the update
-release-notes: "No change on StartOS 0.3.5.x. This build keeps the version number in step with the StartOS 0.4.0 release, which moves to the current packaging SDK."
+release-notes: "Moves the base image off Alpine 3.20, which reached end of life, to Alpine 3.24, picking up security fixes in OpenSSL, musl, zlib and the CA certificates."
 # The type of license for the project
 license: MIT
 # The repository URL for the package wrapper
